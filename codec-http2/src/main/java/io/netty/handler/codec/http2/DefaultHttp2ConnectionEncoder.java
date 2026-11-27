@@ -49,6 +49,8 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder, Ht
     private final Http2FrameWriter frameWriter;
     private final Http2Connection connection;
     private Http2LifecycleManager lifecycleManager;
+    private boolean localConnectProtocolEnabled;
+    private int pendingConnectProtocolEnables;
     // We prefer ArrayDeque to LinkedList because later will produce more GC.
     // This initial capacity is plenty for SETTINGS traffic.
     private final Queue<OutstandingLocalSettings> outstandingLocalSettingsQueue =
@@ -295,6 +297,11 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder, Ht
     }
 
     @Override
+    public boolean isLocalConnectProtocolEnabled() {
+        return localConnectProtocolEnabled;
+    }
+
+    @Override
     public ChannelFuture writeSettings(ChannelHandlerContext ctx, Http2Settings settings,
             ChannelPromise promise) {
         try {
@@ -306,10 +313,27 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder, Ht
             return promise.setFailure(e);
         }
 
-        final OutstandingLocalSettings outstandingLocalSettings = new OutstandingLocalSettings(settings);
+        Boolean enableConnect = settings.connectProtocolEnabled();
+        if (Boolean.FALSE.equals(enableConnect) &&
+                (localConnectProtocolEnabled || pendingConnectProtocolEnables != 0)) {
+            return promise.setFailure(connectionError(PROTOCOL_ERROR,
+                    "SETTINGS_ENABLE_CONNECT_PROTOCOL cannot be revoked"));
+        }
+        boolean enabling = !localConnectProtocolEnabled && Boolean.TRUE.equals(enableConnect);
+        if (enabling) {
+            ++pendingConnectProtocolEnables;
+        }
+        final OutstandingLocalSettings outstandingLocalSettings = new OutstandingLocalSettings(settings, enabling);
         outstandingLocalSettingsQueue.add(outstandingLocalSettings);
         final ChannelPromise writePromise = promise.unvoid();
-        final ChannelFuture future = frameWriter.writeSettings(ctx, settings, writePromise);
+        final ChannelFuture future;
+        try {
+            future = frameWriter.writeSettings(ctx, settings, writePromise);
+        } catch (Throwable cause) {
+            writePromise.tryFailure(cause);
+            outstandingLocalSettings.operationComplete(writePromise);
+            return writePromise;
+        }
         if (future.isDone()) {
             outstandingLocalSettings.operationComplete(future);
         } else {
@@ -441,13 +465,19 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder, Ht
 
     private final class OutstandingLocalSettings implements ChannelFutureListener {
         private final Http2Settings settings;
+        private final boolean enablingConnect;
 
-        OutstandingLocalSettings(Http2Settings settings) {
+        OutstandingLocalSettings(Http2Settings settings, boolean enablingConnect) {
             this.settings = settings;
+            this.enablingConnect = enablingConnect;
         }
 
         @Override
         public void operationComplete(ChannelFuture future) {
+            if (enablingConnect) {
+                --pendingConnectProtocolEnables;
+                localConnectProtocolEnabled |= future.isSuccess();
+            }
             if (!future.isSuccess()) {
                 outstandingLocalSettingsQueue.remove(this);
             }

@@ -57,6 +57,14 @@ public interface Http2ConnectionEncoder extends Http2FrameWriter {
     void remoteSettings(Http2Settings settings) throws Http2Exception;
 
     /**
+     * Returns whether this endpoint has advertised support for extended CONNECT (RFC 8441).
+     * Encoders that support this setting must return {@code true} after successfully writing it with value 1.
+     */
+    default boolean isLocalConnectProtocolEnabled() {
+        return false;
+    }
+
+    /**
      * Writes the given data to the internal {@link Http2FrameWriter} without performing any
      * state checks on the connection/stream.
      */

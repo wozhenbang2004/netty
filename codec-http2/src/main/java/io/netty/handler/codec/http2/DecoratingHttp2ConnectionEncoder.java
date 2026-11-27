@@ -54,6 +54,11 @@ public class DecoratingHttp2ConnectionEncoder extends DecoratingHttp2FrameWriter
     }
 
     @Override
+    public boolean isLocalConnectProtocolEnabled() {
+        return delegate.isLocalConnectProtocolEnabled();
+    }
+
+    @Override
     public void remoteSettings(Http2Settings settings) throws Http2Exception {
         delegate.remoteSettings(settings);
     }
