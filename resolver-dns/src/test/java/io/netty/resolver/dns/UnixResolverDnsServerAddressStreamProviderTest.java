@@ -301,6 +301,42 @@ public class UnixResolverDnsServerAddressStreamProviderTest {
     }
 
     @Test
+    public void ipv4StackFiltersMixedNameserversPerDomain(@TempDir Path tempDir) throws Exception {
+        File resolvConf = buildFile(tempDir, "options rotate\n" +
+                "nameserver ::1\n" +
+                "nameserver 127.0.0.2\n" +
+                "nameserver 2001:db8::1\n" +
+                "nameserver 127.0.0.3\n");
+        File mixedResolverConf = buildFile(tempDir, "domain mixed.test\n" +
+                "nameserver 2001:db8::3\n" +
+                "nameserver 127.0.0.4\n" +
+                "nameserver 127.0.0.5\n");
+        File ipv6ResolverConf = buildFile(tempDir, "domain private.test\n" +
+                "nameserver 2001:db8::2\n");
+        UnixResolverDnsServerAddressStreamProvider provider =
+                new UnixResolverDnsServerAddressStreamProvider(true, resolvConf, mixedResolverConf, ipv6ResolverConf);
+
+        DnsServerAddressStream stream = provider.nameServerAddressStream("public.test");
+        assertThat(stream.size()).isEqualTo(2);
+        assertHostNameEquals("127.0.0.2", stream.next());
+        assertHostNameEquals("127.0.0.3", stream.next());
+        assertHostNameEquals("127.0.0.3", provider.nameServerAddressStream("public.test").next());
+
+        DnsServerAddressStream mixedStream = provider.nameServerAddressStream("host.mixed.test");
+        assertThat(mixedStream.size()).isEqualTo(2);
+        assertHostNameEquals("127.0.0.4", mixedStream.next());
+        assertHostNameEquals("127.0.0.5", mixedStream.next());
+
+        DnsServerAddressStream privateStream = provider.nameServerAddressStream("host.private.test");
+        assertThat(privateStream.size()).isEqualTo(1);
+        assertThat(privateStream.next()).isEqualTo(new InetSocketAddress("2001:db8::2", 53));
+
+        UnixResolverDnsServerAddressStreamProvider explicit =
+                new UnixResolverDnsServerAddressStreamProvider(resolvConf, mixedResolverConf, ipv6ResolverConf);
+        assertThat(explicit.nameServerAddressStream("public.test").size()).isEqualTo(4);
+    }
+
+    @Test
     public void ipv6Nameserver(@TempDir Path tempDir) throws Exception {
         File f = buildFile(tempDir, "search localdomain\n" +
                 "nameserver 10.211.55.1\n" +

@@ -90,6 +90,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -108,6 +109,8 @@ import java.net.Socket;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -4574,6 +4577,49 @@ public class DnsNameResolverTest {
             assertEquals(inetAddress, addr);
         } finally {
             resolver.close();
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(DnsNameResolverChannelStrategy.class)
+    public void testIpv4StackContinuesSearchAfterNxDomain(DnsNameResolverChannelStrategy strategy,
+                                                        @TempDir Path tempDir) throws Exception {
+        String address = "192.0.2.1";
+        String firstName = "backend.first.test";
+        String secondName = "backend.second.test";
+        Queue<String> questions = new ConcurrentLinkedQueue<>();
+        TestDnsServer server = new TestDnsServer(question -> {
+            String name = question.getDomainName();
+            questions.add(name);
+            return secondName.equals(name) ? Collections.singleton(newARecord(name, address)) : null;
+        });
+        server.start();
+        try {
+            Path resolvConf = tempDir.resolve("resolv.conf");
+            Files.write(resolvConf, Arrays.asList("port " + server.localAddress().getPort(),
+                    "nameserver 127.0.0.1", "nameserver ::1", "search first.test second.test"));
+            DnsServerAddressStreamProvider provider =
+                    new UnixResolverDnsServerAddressStreamProvider(true, resolvConf.toFile());
+            DnsNameResolver resolver = new DnsNameResolverBuilder(group.next())
+                    .datagramChannelFactory(() -> new NioDatagramChannel(SocketProtocolFamily.INET))
+                    .datagramChannelStrategy(strategy)
+                    .nameServerProvider(provider)
+                    .searchDomains(UnixResolverDnsServerAddressStreamProvider.parseEtcResolverSearchDomains(
+                            resolvConf.toFile()))
+                    .ndots(5)
+                    .resolvedAddressTypes(ResolvedAddressTypes.IPV4_ONLY)
+                    .queryTimeoutMillis(1000)
+                    .optResourceEnabled(false)
+                    .build();
+            try {
+                InetAddress resolved = resolver.resolve("backend").get(5, TimeUnit.SECONDS);
+                assertThat(resolved.getHostAddress()).isEqualTo(address);
+                assertThat(questions).containsExactly(firstName, secondName);
+            } finally {
+                resolver.close();
+            }
+        } finally {
+            server.stop();
         }
     }
 

@@ -24,6 +24,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -70,7 +71,8 @@ public final class UnixResolverDnsServerAddressStreamProvider implements DnsServ
     static DnsServerAddressStreamProvider parseSilently() {
         try {
             UnixResolverDnsServerAddressStreamProvider nameServerCache =
-                    new UnixResolverDnsServerAddressStreamProvider(ETC_RESOLV_CONF_FILE, ETC_RESOLVER_DIR);
+                    new UnixResolverDnsServerAddressStreamProvider(NetUtil.isIpV4StackPreferred(),
+                            new File(ETC_RESOLV_CONF_FILE), new File(ETC_RESOLVER_DIR).listFiles());
             return nameServerCache.mayOverrideNameServers() ? nameServerCache
                                                             : DefaultDnsServerAddressStreamProvider.INSTANCE;
         } catch (Exception e) {
@@ -95,9 +97,15 @@ public final class UnixResolverDnsServerAddressStreamProvider implements DnsServ
      * @throws IOException If an error occurs while parsing the input files.
      */
     public UnixResolverDnsServerAddressStreamProvider(File etcResolvConf, File... etcResolverFiles) throws IOException {
-        Map<String, DnsServerAddresses> etcResolvConfMap = parse(checkNotNull(etcResolvConf, "etcResolvConf"));
+        this(false, etcResolvConf, etcResolverFiles);
+    }
+
+    UnixResolverDnsServerAddressStreamProvider(boolean preferIpv4Stack, File etcResolvConf, File... etcResolverFiles)
+            throws IOException {
+        Map<String, DnsServerAddresses> etcResolvConfMap =
+                parse(preferIpv4Stack, checkNotNull(etcResolvConf, "etcResolvConf"));
         final boolean useEtcResolverFiles = etcResolverFiles != null && etcResolverFiles.length != 0;
-        domainToNameServerStreamMap = useEtcResolverFiles ? parse(etcResolverFiles) : etcResolvConfMap;
+        domainToNameServerStreamMap = useEtcResolverFiles ? parse(preferIpv4Stack, etcResolverFiles) : etcResolvConfMap;
 
         DnsServerAddresses defaultNameServerAddresses
                 = etcResolvConfMap.get(etcResolvConf.getName());
@@ -155,7 +163,8 @@ public final class UnixResolverDnsServerAddressStreamProvider implements DnsServ
         return !domainToNameServerStreamMap.isEmpty() || defaultNameServerAddresses.stream().next() != null;
     }
 
-    private static Map<String, DnsServerAddresses> parse(File... etcResolverFiles) throws IOException {
+    private static Map<String, DnsServerAddresses> parse(boolean preferIpv4Stack, File... etcResolverFiles)
+            throws IOException {
         Map<String, DnsServerAddresses> domainToNameServerStreamMap =
                 new HashMap<String, DnsServerAddresses>(etcResolverFiles.length << 1);
         boolean rotateGlobal = RES_OPTIONS != null && RES_OPTIONS.contains(OPTIONS_ROTATE_FLAG);
@@ -227,7 +236,8 @@ public final class UnixResolverDnsServerAddressStreamProvider implements DnsServ
                             }
                             domainName = line.substring(i);
                             if (!addresses.isEmpty()) {
-                                putIfAbsent(domainToNameServerStreamMap, domainName, addresses, rotate);
+                                putIfAbsent(domainToNameServerStreamMap, domainName, addresses, rotate,
+                                        preferIpv4Stack);
                             }
                             addresses = new ArrayList<InetSocketAddress>(2);
                         } else if (line.startsWith(PORT_ROW_LABEL)) {
@@ -245,7 +255,7 @@ public final class UnixResolverDnsServerAddressStreamProvider implements DnsServ
                     }
                 }
                 if (!addresses.isEmpty()) {
-                    putIfAbsent(domainToNameServerStreamMap, domainName, addresses, rotate);
+                    putIfAbsent(domainToNameServerStreamMap, domainName, addresses, rotate, preferIpv4Stack);
                 }
             } finally {
                 if (br == null) {
@@ -261,7 +271,20 @@ public final class UnixResolverDnsServerAddressStreamProvider implements DnsServ
     private static void putIfAbsent(Map<String, DnsServerAddresses> domainToNameServerStreamMap,
                                     String domainName,
                                     List<InetSocketAddress> addresses,
-                                    boolean rotate) {
+                                    boolean rotate,
+                                    boolean preferIpv4Stack) {
+        if (preferIpv4Stack) {
+            List<InetSocketAddress> ipv4Addresses = new ArrayList<InetSocketAddress>(addresses.size());
+            for (InetSocketAddress address : addresses) {
+                if (address.getAddress() instanceof Inet4Address) {
+                    ipv4Addresses.add(address);
+                }
+            }
+            // Keep IPv6-only lists so queries for these domains are not sent to a different DNS server.
+            if (!ipv4Addresses.isEmpty()) {
+                addresses = ipv4Addresses;
+            }
+        }
         // TODO(scott): sortlist is being ignored.
         DnsServerAddresses addrs = rotate
             ? DnsServerAddresses.rotational(addresses)
